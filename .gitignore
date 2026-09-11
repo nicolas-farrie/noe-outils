@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+venv/
+.venv/
+.env
+# Notes de travail et prompts longs : locaux, hors git (sauvegardés par dev-backup)
+doc-travail/
+# Fichiers produits par les outils
+*.ods
+out/
