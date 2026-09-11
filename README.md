@@ -21,3 +21,7 @@ produisent de la logistique (présences, horaires, lieux), pas de la gestion de 
 `noe.py` (client de l'API NOÉ) vient de Contact Mailer, copié tel quel : il n'y dépend de
 rien. Les deux copies peuvent diverger — on factorisera en paquet commun le jour où elles
 évolueront toutes les deux.
+
+## Licence
+
+AGPL-3.0-or-later — texte complet dans [`LICENSE`](LICENSE). Même licence que Contact Mailer et que NOÉ.
