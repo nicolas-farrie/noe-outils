@@ -3,6 +3,8 @@ __pycache__/
 venv/
 .venv/
 .env
+# Configuration de l'IDE, propre à la machine
+.idea/
 # Notes de travail et prompts longs : locaux, hors git (sauvegardés par dev-backup)
 doc-travail/
 # Fichiers produits par les outils
