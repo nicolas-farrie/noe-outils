@@ -112,6 +112,10 @@ class NoeClient:
         """Les créneaux datés, chacun rattaché à une activité."""
         return self._list(self._project_endpoint('sessions'))
 
+    def list_places(self):
+        """Les lieux du projet, référencés par `session.places` (liste, souvent vide)."""
+        return self._list(self._project_endpoint('places'))
+
     def list_registrations(self):
         """Les inscriptions au projet (avec user et sessionsSubscriptions)."""
         return self._list(self._project_endpoint('registrations'))

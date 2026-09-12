@@ -1,0 +1,5 @@
+# Client de l'API NOÉ (noe.py).
+requests>=2.31
+
+# Le calcul et les tests n'ont besoin de rien : bibliothèque standard seule.
+#   python3 -m unittest discover -s tests -t .
