@@ -55,6 +55,14 @@ class TestClasseur(unittest.TestCase):
         for nom in ('nbHeureAM', 'nbHeurePM', 'nbHeureJour'):
             self.assertIn(f'table:named-range table:name="{nom}"', self.contenu)
 
+    def test_colonnes_de_resultat_centrees(self):
+        self.assertIn('style:name="centre"', self.contenu)
+        self.assertIn('fo:text-align="center"', self.contenu)
+        # Heures, déjeuner, dîner : centrés ; noms et lieux, à gauche (sans style).
+        self.assertIn('table:style-name="centre" table:formula="of:=[.C4]+[.E4]"', self.contenu)
+        self.assertIn('<table:table-cell office:value-type="string"><text:p>Claude</text:p>',
+                      self.contenu)
+
     def test_formules_de_la_premiere_ligne(self):
         self.assertIn('of:=[.C4]+[.E4]', self.contenu)
         self.assertIn('of:=IF(OR([.C4]&gt;=nbHeureAM;[.F4]&gt;=nbHeureJour);1;0)', self.contenu)

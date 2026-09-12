@@ -44,6 +44,13 @@ _STYLES = (
     '<style:text-properties fo:font-weight="bold"/></style:style>'
     '<style:style style:name="titre" style:family="table-cell">'
     '<style:text-properties fo:font-weight="bold" fo:font-size="14pt"/></style:style>'
+    # Colonnes de résultat centrées, en-têtes compris : les chiffres s'alignent sous leur
+    # titre et se lisent d'un coup d'œil. Noms et lieux restent à gauche.
+    '<style:style style:name="centre" style:family="table-cell">'
+    '<style:paragraph-properties fo:text-align="center"/></style:style>'
+    '<style:style style:name="centre-gras" style:family="table-cell">'
+    '<style:paragraph-properties fo:text-align="center"/>'
+    '<style:text-properties fo:font-weight="bold"/></style:style>'
 )
 
 
@@ -121,9 +128,11 @@ def _feuille_journee(jour, lignes, lieux, seuils):
     rangees = [
         _rangee(_texte(f'JOURNÉE DU {jour:%d/%m/%Y}', 'titre')),
         _rangee(),
-        _rangee(*(_texte(entete, 'gras') for entete in (
-            'Bénévole', 'Lieu du matin', 'Heures AM', 'Lieu du soir', 'Heures PM',
-            'Heures JOUR', 'Déjeuner', 'Dîner'))),
+        _rangee(
+            _texte('Bénévole', 'gras'), _texte('Lieu du matin', 'gras'),
+            _texte('Heures AM', 'centre-gras'), _texte('Lieu du soir', 'gras'),
+            *(_texte(entete, 'centre-gras')
+              for entete in ('Heures PM', 'Heures JOUR', 'Déjeuner', 'Dîner'))),
     ]
 
     premiere = len(rangees) + 1                     # première rangée de données (1-indexée)
@@ -131,13 +140,13 @@ def _feuille_journee(jour, lignes, lieux, seuils):
         numero = premiere + decalage
         rangees.append(_rangee(
             _texte(ligne.nom),
-            _texte(ligne.lieu_matin), _nombre(ligne.am),
-            _texte(ligne.lieu_soir), _nombre(ligne.pm),
-            _formule(f'[.C{numero}]+[.E{numero}]', ligne.jour),
+            _texte(ligne.lieu_matin), _nombre(ligne.am, 'centre'),
+            _texte(ligne.lieu_soir), _nombre(ligne.pm, 'centre'),
+            _formule(f'[.C{numero}]+[.E{numero}]', ligne.jour, 'centre'),
             _formule(f'IF(OR([.C{numero}]>=nbHeureAM;[.F{numero}]>=nbHeureJour);1;0)',
-                     1 if ligne.dejeuner(seuils) else 0),
+                     1 if ligne.dejeuner(seuils) else 0, 'centre'),
             _formule(f'IF(OR([.E{numero}]>=nbHeurePM;[.F{numero}]>=nbHeureJour);1;0)',
-                     1 if ligne.diner(seuils) else 0),
+                     1 if ligne.diner(seuils) else 0, 'centre'),
         ))
     derniere = premiere + len(lignes) - 1
 
@@ -147,13 +156,13 @@ def _feuille_journee(jour, lignes, lieux, seuils):
 
     rangees.append(_rangee(
         _texte('Total de la journée', 'gras'), _vide(5),
-        _formule(f'SUM([.G{premiere}:.G{derniere}])', dejeuners, 'gras'),
-        _formule(f'SUM([.H{premiere}:.H{derniere}])', diners, 'gras'),
+        _formule(f'SUM([.G{premiere}:.G{derniere}])', dejeuners, 'centre-gras'),
+        _formule(f'SUM([.H{premiere}:.H{derniere}])', diners, 'centre-gras'),
     ))
     rangees.append(_rangee())
     rangees.append(_rangee(_texte('Repas par lieu', 'gras')))
-    rangees.append(_rangee(*(_texte(entete, 'gras')
-                             for entete in ('Lieu', 'Déjeuners', 'Dîners'))))
+    rangees.append(_rangee(_texte('Lieu', 'gras'), _texte('Déjeuners', 'centre-gras'),
+                           _texte('Dîners', 'centre-gras')))
 
     premier_lieu = len(rangees) + 1
     for decalage, lieu in enumerate(lieux):
@@ -164,16 +173,16 @@ def _feuille_journee(jour, lignes, lieux, seuils):
             # Le lieu du repas est celui de la demi-journée concernée : le déjeuner se
             # compte sur la colonne « lieu du matin », le dîner sur « lieu du soir ».
             _formule(f'SUMIFS([.G${premiere}:.G${derniere}];'
-                     f'[.B${premiere}:.B${derniere}];[.A{numero}])', attendus[0]),
+                     f'[.B${premiere}:.B${derniere}];[.A{numero}])', attendus[0], 'centre'),
             _formule(f'SUMIFS([.H${premiere}:.H${derniere}];'
-                     f'[.D${premiere}:.D${derniere}];[.A{numero}])', attendus[1]),
+                     f'[.D${premiere}:.D${derniere}];[.A{numero}])', attendus[1], 'centre'),
         ))
     dernier_lieu = premier_lieu + len(lieux) - 1
 
     rangees.append(_rangee(
         _texte('Total', 'gras'),
-        _formule(f'SUM([.B{premier_lieu}:.B{dernier_lieu}])', dejeuners, 'gras'),
-        _formule(f'SUM([.C{premier_lieu}:.C{dernier_lieu}])', diners, 'gras'),
+        _formule(f'SUM([.B{premier_lieu}:.B{dernier_lieu}])', dejeuners, 'centre-gras'),
+        _formule(f'SUM([.C{premier_lieu}:.C{dernier_lieu}])', diners, 'centre-gras'),
     ))
 
     colonnes = ['col-large'] + ['col-moyenne'] * 7
@@ -184,8 +193,8 @@ def _feuille_recap(jours, lieux, premieres_rangees, seuils, genere_le):
     """Un tableau lieux × journées, pointant les totaux de chaque feuille de journée."""
     entetes = [_texte('Lieu', 'gras')]
     for jour in jours:
-        entetes.append(_texte(f'{jour:%d/%m} déj.', 'gras'))
-        entetes.append(_texte(f'{jour:%d/%m} dîn.', 'gras'))
+        entetes.append(_texte(f'{jour:%d/%m} déj.', 'centre-gras'))
+        entetes.append(_texte(f'{jour:%d/%m} dîn.', 'centre-gras'))
 
     rangees = [
         _rangee(_texte('Repas à prévoir', 'titre')),
@@ -203,8 +212,8 @@ def _feuille_recap(jours, lieux, premieres_rangees, seuils, genere_le):
         for jour in jours:
             rangee_lieu = premieres_rangees[jour] + decalage
             attendus = totaux[jour].get(lieu, (0, 0))
-            cellules.append(_formule(_reference(jour, f'B{rangee_lieu}'), attendus[0]))
-            cellules.append(_formule(_reference(jour, f'C{rangee_lieu}'), attendus[1]))
+            cellules.append(_formule(_reference(jour, f'B{rangee_lieu}'), attendus[0], 'centre'))
+            cellules.append(_formule(_reference(jour, f'C{rangee_lieu}'), attendus[1], 'centre'))
         rangees.append(_rangee(*cellules))
     derniere = premiere + len(lieux) - 1
 
@@ -214,7 +223,8 @@ def _feuille_recap(jours, lieux, premieres_rangees, seuils, genere_le):
             colonne = chr(ord('B') + indice * 2 + repas)
             attendu = sum(compte[repas] for compte in totaux[jour].values())
             totaux_colonnes.append(
-                _formule(f'SUM([.{colonne}{premiere}:.{colonne}{derniere}])', attendu, 'gras'))
+                _formule(f'SUM([.{colonne}{premiere}:.{colonne}{derniere}])', attendu,
+                         'centre-gras'))
     rangees.append(_rangee(*totaux_colonnes))
 
     colonnes = ['col-large'] + ['col-moyenne'] * (2 * len(jours))
