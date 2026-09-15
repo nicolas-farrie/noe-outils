@@ -16,7 +16,8 @@ from collections import Counter
 
 from .calcul import (creneaux_depuis_noe, creneaux_encadrement, encadrements_sans_espace,
                      releve_anomalies, tableau, totaux_du_jour, totaux_par_lieu)
-from .regimes import REGIMES, champ_regime, profils_alimentaires, repartition, signalements
+from .regimes import (REGIMES, champ_regime, profils_alimentaires, repartition, signalements,
+                      tags_utilises)
 from .regles import REGLES_BENEVOLES
 
 VARIABLES = ('NOE_URL', 'NOE_TOKEN', 'NOE_PROJECT_ID')
@@ -37,7 +38,8 @@ def client_depuis_environnement():
 
 
 def lire(client):
-    """(créneaux, profils alimentaires, lectures) — les listes de l'API, croisées côté client.
+    """(créneaux, profils alimentaires, tags utilisés, lectures) — les listes de l'API,
+    croisées côté client.
 
     Les filtres de NOÉ ne traversent pas les références : on lit tout, on croise ici.
     """
@@ -58,7 +60,7 @@ def lire(client):
     else:
         profils = profils_alimentaires(inscriptions, cle_regime)
 
-    return benevolat + encadrement, profils, {
+    return benevolat + encadrement, profils, tags_utilises(inscriptions), {
         'lieux': len(lieux), 'sessions': len(sessions), 'inscriptions': len(inscriptions),
         'créneaux souscrits': len(benevolat), 'encadrants': len(fiches),
         'encadrements': len(encadrement)}
@@ -68,8 +70,20 @@ def _comptes(totaux, regles):
     return ', '.join(f'{totaux[p.repas]} {p.nom_repas.lower()}(s)' for p in regles.plages)
 
 
+def _ligne_tags(tags_noe, regimes):
+    """Tous les tags posés dans NOÉ — pour repérer un tag qui ne serait pas alimentaire."""
+    if not tags_noe:
+        return 'Tags utilisés dans NOÉ : aucun'
+    liste = ', '.join(f'{tag} {nombre}' for tag, nombre in sorted(tags_noe.items()))
+    if regimes.tags_exceptions is None:
+        return f'Tags utilisés dans NOÉ (tous pris comme exceptions alimentaires) : {liste}'
+    ecartes = sorted(tag for tag in tags_noe if not regimes.exceptions([tag]))
+    return (f'Tags utilisés dans NOÉ : {liste}'
+            + (f' — non retenus comme exceptions : {", ".join(ecartes)}' if ecartes else ''))
+
+
 def resume(jours, regles=REGLES_BENEVOLES, anomalies=(), sans_espace=0, profils=None,
-           regimes=REGIMES):
+           regimes=REGIMES, tags_noe=None):
     """Le rapport de contrôle, en lignes de texte : des comptages, jamais de noms."""
     lignes_rapport = []
     cumul = {plage.repas: 0 for plage in regles.plages}
@@ -90,7 +104,7 @@ def resume(jours, regles=REGLES_BENEVOLES, anomalies=(), sans_espace=0, profils=
         lignes_rapport.append(f'Encadrements sans espace, sans repas : {sans_espace}')
     if profils is not None:
         categories = Counter()
-        for ligne in repartition(jours, profils, regles):
+        for ligne in repartition(jours, profils, regles, regimes):
             categories.update(ligne.categories)
         lignes_rapport.append('Régimes (repas accordés) : ' + ', '.join(
             f'{categorie} {categories[categorie]}' for categorie in regimes.colonnes()))
@@ -99,6 +113,8 @@ def resume(jours, regles=REGLES_BENEVOLES, anomalies=(), sans_espace=0, profils=
         if tags:
             lignes_rapport.append('Exceptions (repas accordés) : ' + ', '.join(
                 f'{tag} {nombre}' for tag, nombre in sorted(tags.items())))
+    if tags_noe is not None:
+        lignes_rapport.append(_ligne_tags(tags_noe, regimes))
     if anomalies:
         heures = round(sum(anomalie.heures for anomalie in anomalies), 2)
         lignes_rapport.append(
@@ -130,12 +146,13 @@ def main(arguments=None):
 
     regles = REGLES_BENEVOLES.avec_seuils(dejeuner=options.seuil_dejeuner,
                                           diner=options.seuil_diner)
-    creneaux, profils, lectures = lire(client_depuis_environnement())
+    creneaux, profils, tags_noe, lectures = lire(client_depuis_environnement())
     jours = tableau(creneaux, regles)
     anomalies = releve_anomalies(creneaux, regles)
 
     print(', '.join(f'{valeur} {nom}' for nom, valeur in lectures.items()))
-    for ligne in resume(jours, regles, anomalies, encadrements_sans_espace(creneaux), profils):
+    for ligne in resume(jours, regles, anomalies, encadrements_sans_espace(creneaux), profils,
+                        tags_noe=tags_noe):
         print(ligne)
 
     if options.out:

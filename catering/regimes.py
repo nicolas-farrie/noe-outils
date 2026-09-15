@@ -35,6 +35,7 @@ MENTION_RGPD = (
 STANDARD = 'Standard'
 A_VERIFIER = 'À vérifier'
 INCONNU = 'Inconnu'          # encadrant sans inscription reliée : pas de formulaire
+FLEXI = 'Flexi-vegan'        # vegan de préférence, végétarien accepté — réparti au comptage
 
 
 def normaliser(texte):
@@ -48,12 +49,17 @@ class Regimes:
     """Comment lire le champ régime et les tags d'une inscription."""
 
     # (catégorie, valeurs du champ qui y mènent), comparées une fois normalisées.
-    # « vegan/végétarien » va au plus strict : un repas végétalien convient aussi à un
-    # végétarien, l'inverse non.
     categories: tuple = (
         ('Végétarien', ('végé', 'végétarien', 'végétarienne', 'veggie')),
-        ('Végétalien', ('vegan', 'végane', 'végétalien', 'végétalienne', 'vegan/végétarien')),
+        ('Végétalien', ('vegan', 'végane', 'végétalien', 'végétalienne')),
     )
+    # Flexi-vegan (« vegan/végétarien », renseignement pris auprès de l'équipe le 15/09) :
+    # vegan de préférence, végétarien accepté. Pas de plat à part : sur un même repas et un
+    # même lieu, ils rejoignent les vegans s'il y en a déjà — le plat existe —, sinon les
+    # végétariens.
+    flexi: tuple = ('vegan/végétarien', 'flexi', 'flexi-vegan')
+    flexi_prefere: str = 'Végétalien'
+    flexi_repli: str = 'Végétarien'
     # Valeurs qui signifient « pas de régime particulier ».
     sans_regime: tuple = ('', 'non', 'aucun', 'aucune', 'rien', 'ras', 'no', '-', 'standard',
                           'normal')
@@ -65,6 +71,8 @@ class Regimes:
         valeur = normaliser(declaration)
         if valeur in {normaliser(v) for v in self.sans_regime}:
             return STANDARD
+        if valeur in {normaliser(v) for v in self.flexi}:
+            return FLEXI
         for nom, valeurs in self.categories:
             if valeur in {normaliser(v) for v in valeurs}:
                 return nom
@@ -117,6 +125,13 @@ def profils_alimentaires(registrations, cle_champ, regimes=REGIMES):
     return profils
 
 
+def tags_utilises(registrations):
+    """Counter des tags posés sur les inscriptions — des noms de tags, aucune personne.
+    Sert à repérer un tag qui ne serait pas alimentaire."""
+    return Counter(str(tag).strip() for inscription in registrations
+                   for tag in (inscription.get('tags') or []) if str(tag).strip())
+
+
 @dataclass(frozen=True)
 class Repartition:
     """Les repas servis pour un jour, un repas et un lieu, par catégorie de régime."""
@@ -124,8 +139,9 @@ class Repartition:
     jour: object
     plage: object
     lieu: str
-    categories: Counter
+    categories: Counter    # flexi-vegans déjà répartis
     avec_exception: int
+    dont_flexi: int = 0
 
 
 @dataclass(frozen=True)
@@ -144,7 +160,7 @@ def _profil(profils, ligne):
     return profils.get(ligne.benevole) or Profil(INCONNU, (), '')
 
 
-def repartition(jours, profils, regles=REGLES_BENEVOLES):
+def repartition(jours, profils, regles=REGLES_BENEVOLES, regimes=REGIMES):
     """[Repartition] — seuls les repas accordés comptent, dans l'ordre jour, repas, lieu."""
     resultat = []
     for jour, lignes in jours.items():
@@ -156,8 +172,14 @@ def repartition(jours, profils, regles=REGLES_BENEVOLES):
                 lieu, profil = ligne.lieux[plage.repas], _profil(profils, ligne)
                 categories[lieu][profil.categorie] += 1
                 exceptions[lieu] += bool(profil.exceptions)
-            resultat += [Repartition(jour, plage, lieu, categories[lieu], exceptions[lieu])
-                         for lieu in sorted(categories)]
+            for lieu in sorted(categories):
+                compte = categories[lieu]
+                flexis = compte.pop(FLEXI, 0)
+                if flexis:
+                    cible = (regimes.flexi_prefere if compte[regimes.flexi_prefere] > 0
+                             else regimes.flexi_repli)
+                    compte[cible] += flexis
+                resultat.append(Repartition(jour, plage, lieu, compte, exceptions[lieu], flexis))
     return resultat
 
 

@@ -12,7 +12,8 @@ repas si elle est activée.
 Chaque cellule calculée porte **à la fois sa formule et sa valeur** : un aperçu qui ne
 recalcule pas affiche quand même les bons chiffres.
 
-Disposition : « Récap », une feuille par journée, « Anomalies » s'il y en a, « Variables ».
+Disposition : « Récap », « Régimes », une feuille par journée, « Anomalies » s'il y en a,
+« Variables ».
 Le bloc « repas par lieu » liste les mêmes lieux, dans le même ordre, sur toutes les
 feuilles de journée — c'est ce qui permet au récapitulatif de les pointer par adresse.
 """
@@ -314,17 +315,22 @@ def _feuille_regimes(jours, profils, regles, regimes):
         _rangee(_texte('Régime : champ du formulaire d\'inscription. Exceptions : tags posés '
                        'par l\'équipe dans NOÉ. « Inconnu » : encadrant sans inscription '
                        'reliée.')),
+        _rangee(_texte(f'Flexi-vegan : comptés avec les {regimes.flexi_prefere.lower()}s '
+                       'quand il y en a sur le même repas et le même lieu, sinon avec les '
+                       f'{regimes.flexi_repli.lower()}s (colonne « Dont flexi »).')),
         _rangee(),
         _rangee(_texte('Jour', 'gras'), _texte('Repas', 'gras'), _texte('Lieu', 'gras'),
                 _texte('Repas servis', 'centre-gras'),
                 *(_texte(categorie, 'centre-gras') for categorie in categories),
+                _texte('Dont flexi', 'centre-gras'),
                 _texte('Avec exception', 'centre-gras')),
     ]
-    for ligne in repartition(jours, profils, regles):
+    for ligne in repartition(jours, profils, regles, regimes):
         rangees.append(_rangee(
             _texte(f'{ligne.jour:%d/%m}'), _texte(ligne.plage.nom_repas), _texte(ligne.lieu),
             _nombre(sum(ligne.categories.values()), 'centre'),
             *(_nombre(ligne.categories.get(categorie, 0), 'centre') for categorie in categories),
+            _nombre(ligne.dont_flexi, 'centre'),
             _nombre(ligne.avec_exception, 'centre')))
 
     rangees += [
@@ -409,8 +415,10 @@ def _contenu(jours, regles, regles_encadrants, anomalies, genere_le, profils, re
     avec_regimes = profils is not None
     corps = (_feuille_recap(jours, lieux, premieres_rangees, regles, regles_encadrants,
                             genere_le, MENTION_RGPD if avec_regimes else None)
-             + ''.join(feuilles)
+             # Juste après le récapitulatif : c'est la feuille que la cuisine cherche, elle
+             # ne doit pas se perdre derrière les journées.
              + (_feuille_regimes(jours, profils, regles, regimes) if avec_regimes else '')
+             + ''.join(feuilles)
              + (_feuille_anomalies(anomalies) if anomalies else '')
              + _feuille_variables(regles, regles_encadrants) + _plages_nommees(regles))
 
