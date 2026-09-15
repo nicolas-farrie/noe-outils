@@ -1,23 +1,20 @@
-"""Qui mange, quand, et sur quel site — calculé depuis les créneaux souscrits dans NOÉ.
+"""Qui mange, quand, et sur quel lieu — calculé depuis les créneaux souscrits dans NOÉ.
 
-Règles (`catering/README.md`, confirmées par l'équipe du festival le 11/09/2026). Par
-bénévole et par jour, en heure locale :
+Les règles (plages, seuils, arrondi) vivent dans `regles.py` ; ce module ne fait que les
+appliquer. Pour chaque personne et chaque jour :
 
-    AM   = heures de créneau entre 08:00 et 13:00
-    PM   = heures de créneau entre 13:00 et minuit
-    JOUR = AM + PM, tous lieux confondus
+1. ses créneaux sont mis à plat, chevauchements déduits ;
+2. chaque créneau est découpé sur les plages de la journée. Une plage peut déborder après
+   minuit — le soir court jusqu'à 03:00 — et ces heures de nuit restent rattachées à la
+   veille ;
+3. les heures de chaque plage sont arrondies, puis comparées au seuil de la plage : le
+   repas est accordé ou non ;
+4. le repas est servi au lieu où la personne passe le plus d'heures dans la plage — une
+   personne n'a qu'un repas par plage, même présente sur deux lieux.
 
-    déjeuner  si AM >= nbHeureAM  ou  JOUR >= nbHeureJour
-    dîner     si PM >= nbHeurePM  ou  JOUR >= nbHeureJour
-
-Le total de la journée l'emporte sur les demi-journées : 1 h le matin puis 5 h
-l'après-midi ouvrent droit aux deux repas, alors qu'aucun des deux seuils de demi-journée
-n'est atteint.
-
-Les repas étant livrés sur plusieurs sites, chacun est rattaché au lieu où la personne
-passe le plus d'heures dans la demi-journée concernée. Le droit au repas se décide sur la
-journée entière, le lieu seulement après : la somme des lieux vaut toujours le total du
-jour, aucun repas ne se perd en changeant de site.
+Les heures qui ne tombent dans aucune plage (entre 03:00 et 08:00 pour les bénévoles) ne
+comptent pour aucun repas : elles sont relevées comme anomalies. Pour l'équipe, ce sont
+des erreurs de saisie ou des heures de nuit à vérifier dans NOÉ.
 
 Module volontairement sans réseau ni dépendance : tout entre par `creneaux_depuis_noe()`,
 qui prend les listes déjà lues par `NoeClient`.
@@ -28,39 +25,20 @@ from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-# L'API date les créneaux en UTC ; le découpage, lui, est une règle humaine (« le matin »),
+from .regles import PRECISION, REGLES_BENEVOLES
+
+# L'API date les créneaux en UTC ; le découpage, lui, est une règle humaine (« le soir »),
 # donc il se fait en heure locale — sinon tout est décalé de deux heures en septembre.
 FUSEAU = ZoneInfo('Europe/Paris')
 
-# Les deux plages de la journée. La nuit, de minuit à 08:00, ne compte pas : aucun repas
-# n'y est servi.
-PLAGES = (('am', 8, 13), ('pm', 13, 24))
-
 SANS_LIEU = '(sans lieu)'
 
-# Les heures sont arrondies au dix-millième (0,36 s) avant toute comparaison : sans cela,
-# une somme de flottants peut rendre 5,999999 pour six heures pleines et faire sauter un
-# repas. Même arrondi que celui écrit dans le tableur, pour que ses formules retrouvent
-# exactement les valeurs calculées ici.
-PRECISION = 4
 EPSILON = 10 ** -(PRECISION + 2)
 
 
 @dataclass(frozen=True)
-class Seuils:
-    """Les trois variables du tableau, en heures."""
-
-    am: float = 2.0
-    pm: float = 4.0
-    jour: float = 6.0
-
-
-SEUILS_DEFAUT = Seuils()
-
-
-@dataclass(frozen=True)
 class Creneau:
-    """Un bénévole, un intervalle daté (heure locale), un lieu."""
+    """Une personne, un intervalle daté (heure locale), un lieu."""
 
     benevole: str          # identifiant NOÉ de la personne (stable d'un projet à l'autre)
     nom: str               # « Prénom Nom », pour le tableau remis à l'équipe
@@ -69,36 +47,41 @@ class Creneau:
     lieu: str = SANS_LIEU
 
 
+@dataclass(frozen=True)
+class Anomalie:
+    """Un créneau dont une partie ne tombe dans aucune plage."""
+
+    creneau: Creneau
+    heures: float          # heures hors de toute plage
+
+
 @dataclass
 class Presence:
-    """Heures d'un bénévole sur une journée, ventilées par plage et par lieu."""
+    """Heures d'une personne sur une journée, par plage puis par lieu."""
 
     nom: str
-    am: dict = field(default_factory=dict)           # lieu -> heures
-    pm: dict = field(default_factory=dict)           # lieu -> heures
-    debut_lieu: dict = field(default_factory=dict)   # lieu -> premier créneau commencé
+    heures: dict = field(default_factory=lambda: defaultdict(dict))  # repas -> {lieu: heures}
+    fenetre: dict = field(default_factory=dict)       # repas -> heures pendant le repas
+    debut_lieu: dict = field(default_factory=dict)    # lieu -> premier créneau commencé
 
 
 @dataclass
 class Ligne:
-    """Une ligne du tableau : un bénévole, un jour."""
+    """Une ligne du tableau : une personne, un jour."""
 
     benevole: str
     nom: str
-    am: float
-    pm: float
-    lieu_matin: str
-    lieu_soir: str
+    heures: dict           # repas -> heures de la plage, arrondies
+    fenetre: dict          # repas -> heures pendant le repas, exactes
+    lieux: dict            # repas -> lieu où le repas est servi
 
-    @property
-    def jour(self):
-        return round(self.am + self.pm, PRECISION)
-
-    def dejeuner(self, seuils=SEUILS_DEFAUT):
-        return self.am >= seuils.am - EPSILON or self.jour >= seuils.jour - EPSILON
-
-    def diner(self, seuils=SEUILS_DEFAUT):
-        return self.pm >= seuils.pm - EPSILON or self.jour >= seuils.jour - EPSILON
+    def a_droit(self, plage):
+        """Le repas de cette plage est-il accordé ?"""
+        heures = self.heures.get(plage.repas, 0)
+        if heures > 0 and heures >= plage.seuil - EPSILON:
+            return True
+        return (plage.fenetre_active
+                and self.fenetre.get(plage.repas, 0) >= plage.presence_fenetre - EPSILON)
 
 
 def _ident(valeur):
@@ -139,8 +122,8 @@ def creneaux_depuis_noe(sessions, registrations, lieux):
             session = par_id.get(_ident(souscription.get('session')))
             if not session or not session.get('start') or not session.get('end'):
                 continue
-            # Une session peut porter plusieurs lieux ; on retient le premier, comme le
-            # prototype du 10/09 — le cas ne s'est pas présenté sur le festival.
+            # Une session peut porter plusieurs espaces ; on retient le premier — le cas ne
+            # s'est pas présenté sur le festival.
             references = [_ident(lieu) for lieu in (session.get('places') or [])]
             lieu = lieux.get(references[0], SANS_LIEU) if references else SANS_LIEU
             creneaux.append(Creneau(
@@ -154,31 +137,66 @@ def creneaux_depuis_noe(sessions, registrations, lieux):
     return creneaux
 
 
-def _borne(jour, heure):
-    """L'instant local `jour` à `heure` h — 24 désignant minuit au jour suivant."""
-    if heure >= 24:
-        return datetime.combine(jour + timedelta(days=1), time(0), tzinfo=FUSEAU)
-    return datetime.combine(jour, time(heure), tzinfo=FUSEAU)
+def _instant(jour, heures):
+    """L'instant local à `heures` h du jour J — au-delà de 24, le lendemain (27 → 03:00)."""
+    jours, minutes = divmod(round(heures * 60), 24 * 60)
+    return datetime.combine(jour + timedelta(days=jours),
+                            time(minutes // 60, minutes % 60), tzinfo=FUSEAU)
 
 
-def _decoupe(debut, fin):
-    """(jour, plage, heures) pour chaque portion utile de l'intervalle.
+def _chevauchement(debut, fin, borne_debut, borne_fin):
+    """Heures communes à deux intervalles."""
+    return max(0.0, (min(fin, borne_fin) - max(debut, borne_debut)).total_seconds() / 3600)
 
-    Un créneau de 11 h à 15 h donne 2 h le matin et 2 h l'après-midi ; un créneau de 22 h
-    à 2 h donne 2 h le soir et rien le lendemain, la nuit ne comptant pas.
-    """
-    jour = debut.date()
+
+def _jours(debut, fin):
+    """Les jours dont une plage peut toucher l'intervalle — à partir de la veille, puisqu'un
+    créneau commencé à 01:00 appartient au soir du jour précédent."""
+    jour = debut.date() - timedelta(days=1)
     while jour <= fin.date():
-        for plage, depart, arrivee in PLAGES:
-            duree = (min(fin, _borne(jour, arrivee))
-                     - max(debut, _borne(jour, depart))).total_seconds() / 3600
-            if duree > 0:
-                yield jour, plage, round(duree, PRECISION)
+        yield jour
         jour += timedelta(days=1)
 
 
-def heures_par_jour(creneaux):
-    """{jour: {bénévole: Presence}} — chevauchements déduits.
+def _portions(debut, fin, regles):
+    """(jour, plage, heures, heures pendant le repas) pour chaque plage touchée."""
+    for jour in _jours(debut, fin):
+        for plage in regles.plages:
+            heures = _chevauchement(debut, fin, _instant(jour, plage.debut),
+                                    _instant(jour, plage.fin))
+            if heures <= 0:
+                continue
+            pendant_repas = (_chevauchement(debut, fin, _instant(jour, plage.fenetre[0]),
+                                            _instant(jour, plage.fenetre[1]))
+                             if plage.fenetre else 0.0)
+            yield jour, plage, heures, pendant_repas
+
+
+def heures_hors_plages(debut, fin, regles):
+    """Heures de l'intervalle qui ne tombent dans aucune plage."""
+    bornes = sorted((_instant(jour, plage.debut), _instant(jour, plage.fin))
+                    for jour in _jours(debut, fin) for plage in regles.plages)
+    couvertes, curseur = 0.0, debut
+    for borne_debut, borne_fin in bornes:   # les plages peuvent se chevaucher : on les unit
+        depart, arrivee = max(borne_debut, curseur), min(borne_fin, fin)
+        if arrivee > depart:
+            couvertes += (arrivee - depart).total_seconds() / 3600
+            curseur = arrivee
+    return round((fin - debut).total_seconds() / 3600 - couvertes, PRECISION)
+
+
+def releve_anomalies(creneaux, regles=REGLES_BENEVOLES):
+    """Les créneaux qui débordent des plages, dans l'ordre chronologique."""
+    anomalies = []
+    for creneau in sorted(creneaux, key=lambda c: (c.debut, c.nom)):
+        heures = heures_hors_plages(creneau.debut, creneau.fin, regles)
+        if heures > 0:
+            anomalies.append(Anomalie(creneau, heures))
+    return anomalies
+
+
+def heures_par_jour(creneaux, regles=REGLES_BENEVOLES):
+    """{jour: {personne: Presence}} — chevauchements déduits.
 
     Une personne inscrite à deux créneaux qui se recouvrent n'est présente qu'une fois :
     la partie commune revient au créneau commencé le premier, et donc à son lieu.
@@ -196,63 +214,67 @@ def heures_par_jour(creneaux):
                 continue  # entièrement recouvert par un créneau précédent
             curseur = creneau.fin if curseur is None else max(curseur, creneau.fin)
 
-            for jour, plage, duree in _decoupe(debut, creneau.fin):
+            for jour, plage, heures, pendant_repas in _portions(debut, creneau.fin, regles):
                 presence = presences[jour].setdefault(benevole, Presence(creneau.nom))
-                cumul = presence.am if plage == 'am' else presence.pm
-                cumul[creneau.lieu] = round(cumul.get(creneau.lieu, 0.0) + duree, PRECISION)
+                par_lieu = presence.heures[plage.repas]
+                par_lieu[creneau.lieu] = round(par_lieu.get(creneau.lieu, 0.0) + heures,
+                                               PRECISION)
+                if pendant_repas:
+                    presence.fenetre[plage.repas] = round(
+                        presence.fenetre.get(plage.repas, 0.0) + pendant_repas, PRECISION)
                 presence.debut_lieu.setdefault(creneau.lieu, creneau.debut)
 
     return presences
 
 
-def _lieu_dominant(cumul, presence):
+def _lieu_dominant(par_lieu, presence):
     """Le lieu où la personne passe le plus d'heures ; à égalité, le premier commencé.
 
-    Demi-journée vide — six heures d'affilée le matin ouvrent quand même droit au dîner :
-    on retient alors le lieu dominant de la journée, pour que le repas ne disparaisse pas
-    du décompte d'un site.
+    Plage vide (cas d'un seuil à zéro, ou d'une fenêtre de repas active) : on retient le
+    lieu dominant de la journée, pour que le repas ne disparaisse pas du décompte.
     """
-    if not cumul:
-        cumul = {lieu: presence.am.get(lieu, 0.0) + presence.pm.get(lieu, 0.0)
-                 for lieu in set(presence.am) | set(presence.pm)}
-    if not cumul:
+    if not par_lieu:
+        par_lieu = defaultdict(float)
+        for heures_plage in presence.heures.values():
+            for lieu, heures in heures_plage.items():
+                par_lieu[lieu] += heures
+    if not par_lieu:
         return SANS_LIEU
-    return min(cumul, key=lambda lieu: (-cumul[lieu], presence.debut_lieu.get(lieu)))
+    return min(par_lieu, key=lambda lieu: (-par_lieu[lieu], presence.debut_lieu.get(lieu)))
 
 
-def lignes_du_jour(presences_du_jour):
-    """Une ligne par bénévole présent ce jour-là, triée par nom."""
+def lignes_du_jour(presences_du_jour, regles=REGLES_BENEVOLES):
+    """Une ligne par personne présente ce jour-là, triée par nom."""
     lignes = []
     for benevole, presence in presences_du_jour.items():
-        lignes.append(Ligne(
-            benevole=benevole,
-            nom=presence.nom,
-            am=round(sum(presence.am.values()), PRECISION),
-            pm=round(sum(presence.pm.values()), PRECISION),
-            lieu_matin=_lieu_dominant(presence.am, presence),
-            lieu_soir=_lieu_dominant(presence.pm, presence),
-        ))
+        heures, lieux = {}, {}
+        for plage in regles.plages:
+            par_lieu = presence.heures.get(plage.repas, {})
+            heures[plage.repas] = regles.arrondir(sum(par_lieu.values()))
+            lieux[plage.repas] = _lieu_dominant(par_lieu, presence)
+        lignes.append(Ligne(benevole, presence.nom, heures, dict(presence.fenetre), lieux))
     return sorted(lignes, key=lambda ligne: (ligne.nom, ligne.benevole))
 
 
-def tableau(creneaux):
+def tableau(creneaux, regles=REGLES_BENEVOLES):
     """{jour: [Ligne]} — le tableau complet, jours dans l'ordre."""
-    presences = heures_par_jour(creneaux)
-    return {jour: lignes_du_jour(presences[jour]) for jour in sorted(presences)}
+    presences = heures_par_jour(creneaux, regles)
+    return {jour: lignes_du_jour(presences[jour], regles) for jour in sorted(presences)}
 
 
-def totaux_par_lieu(lignes, seuils=SEUILS_DEFAUT):
-    """{lieu: (déjeuners, dîners)} pour une journée."""
-    totaux = defaultdict(lambda: [0, 0])
+def totaux_par_lieu(lignes, regles=REGLES_BENEVOLES):
+    """{lieu: {repas: nombre}} pour une journée — seuls les lieux où l'on mange."""
+    totaux = {}
     for ligne in lignes:
-        if ligne.dejeuner(seuils):
-            totaux[ligne.lieu_matin][0] += 1
-        if ligne.diner(seuils):
-            totaux[ligne.lieu_soir][1] += 1
-    return {lieu: tuple(compte) for lieu, compte in sorted(totaux.items())}
+        for plage in regles.plages:
+            if ligne.a_droit(plage):
+                compte = totaux.setdefault(ligne.lieux[plage.repas],
+                                           {p.repas: 0 for p in regles.plages})
+                compte[plage.repas] += 1
+    return dict(sorted(totaux.items()))
 
 
-def totaux_du_jour(lignes, seuils=SEUILS_DEFAUT):
-    """(déjeuners, dîners) pour une journée, tous lieux confondus."""
-    return (sum(1 for ligne in lignes if ligne.dejeuner(seuils)),
-            sum(1 for ligne in lignes if ligne.diner(seuils)))
+def totaux_du_jour(lignes, regles=REGLES_BENEVOLES):
+    """{repas: nombre} pour une journée, tous lieux confondus."""
+    return {plage.repas: sum(1 for ligne in lignes if ligne.a_droit(plage))
+            for plage in regles.plages}

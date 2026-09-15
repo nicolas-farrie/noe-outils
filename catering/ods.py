@@ -2,24 +2,27 @@
 
 Un `.ods` est une archive zip de quelques fichiers XML ; la bibliothèque standard suffit
 à l'écrire. Le faire à la main plutôt qu'avec `odfpy` a une raison précise : le classeur
-doit porter des **plages nommées** (`nbHeureAM`, `nbHeurePM`, `nbHeureJour`) et des
-formules `SUMIFS`, comme le fichier d'exemple de l'équipe. L'équipe change une valeur dans
-la feuille « Variables » et tout le classeur se recalcule.
+porte des **plages nommées** (`seuilDejeuner`, `seuilDiner`) et des formules `SUMIFS`.
+L'équipe change un seuil dans la feuille « Variables » et tout le classeur se recalcule.
+
+Ce que le tableur ne peut pas refaire reste calculé par Python et écrit en valeur : le
+découpage des créneaux sur les plages, l'arrondi, le choix du lieu, et la fenêtre de
+repas si elle est activée.
 
 Chaque cellule calculée porte **à la fois sa formule et sa valeur** : un aperçu qui ne
-recalcule pas (l'application Seafile sur téléphone, par exemple) affiche quand même les
-bons chiffres.
+recalcule pas affiche quand même les bons chiffres.
 
-Disposition : une feuille « Récap », une feuille par journée, une feuille « Variables ».
+Disposition : « Récap », une feuille par journée, « Anomalies » s'il y en a, « Variables ».
 Le bloc « repas par lieu » liste les mêmes lieux, dans le même ordre, sur toutes les
-feuilles de journée — c'est ce qui permet au récapitulatif de les pointer par leur adresse.
+feuilles de journée — c'est ce qui permet au récapitulatif de les pointer par adresse.
 """
 
 import zipfile
 from datetime import datetime
 from xml.sax.saxutils import escape, quoteattr
 
-from .calcul import SANS_LIEU, SEUILS_DEFAUT, totaux_par_lieu
+from .calcul import SANS_LIEU, totaux_par_lieu
+from .regles import REGLES_BENEVOLES, _hhmm
 
 MIMETYPE = 'application/vnd.oasis.opendocument.spreadsheet'
 
@@ -94,10 +97,29 @@ def _feuille(nom, colonnes, rangees):
             + ''.join(rangees) + '</table:table>')
 
 
+def _colonne(indice):
+    """La lettre d'une colonne : 0 → A, 25 → Z, 26 → AA."""
+    lettres = ''
+    indice += 1
+    while indice:
+        indice, reste = divmod(indice - 1, 26)
+        lettres = chr(ord('A') + reste) + lettres
+    return lettres
+
+
 # === Feuilles ===
 
 def _nom_feuille(jour):
     return f'{jour:%Y-%m-%d}'
+
+
+def _nom_seuil(plage):
+    """Nom de la plage nommée qui porte le seuil : `seuilDejeuner`, `seuilDiner`."""
+    return 'seuil' + plage.repas[0].upper() + plage.repas[1:]
+
+
+def _abreviation(plage):
+    return plage.nom_repas[:3].lower() + '.'
 
 
 def _reference(jour, cellule):
@@ -110,168 +132,214 @@ def _reference(jour, cellule):
 
 
 def _lieux_du_classeur(jours):
-    """Tous les lieux rencontrés, dans un ordre stable — « (sans lieu) » à la fin."""
+    """Tous les lieux où un repas peut être servi, dans un ordre stable — « (sans lieu) »
+    à la fin."""
     lieux = set()
     for lignes in jours.values():
         for ligne in lignes:
-            lieux.update((ligne.lieu_matin, ligne.lieu_soir))
+            lieux.update(ligne.lieux.values())
     ordinaires = sorted(lieu for lieu in lieux if lieu != SANS_LIEU)
     return ordinaires + ([SANS_LIEU] if SANS_LIEU in lieux else [])
 
 
-def _feuille_journee(jour, lignes, lieux, seuils):
-    """Une journée : le détail par bénévole, puis le récapitulatif par lieu.
+def _feuille_journee(jour, lignes, lieux, regles):
+    """Une journée : le détail par personne, puis le récapitulatif par lieu.
 
+    Colonnes : A nom ; puis, par plage, lieu et heures ; puis, par plage, le repas.
     Renvoie (xml, rangee_premier_lieu) — le récapitulatif du classeur a besoin de savoir
     à quelle rangée commence le bloc des lieux.
     """
+    plages = regles.plages
+    nombre = len(plages)
+    col_lieu = {p.repas: _colonne(1 + 2 * i) for i, p in enumerate(plages)}
+    col_heures = {p.repas: _colonne(2 + 2 * i) for i, p in enumerate(plages)}
+    col_repas = {p.repas: _colonne(1 + 2 * nombre + i) for i, p in enumerate(plages)}
+
+    entetes = [_texte('Bénévole', 'gras')]
+    for plage in plages:
+        entetes += [_texte(f'Lieu du {plage.libelle}', 'gras'),
+                    _texte(f'Heures {plage.libelle}', 'centre-gras')]
+    entetes += [_texte(plage.nom_repas, 'centre-gras') for plage in plages]
     rangees = [
         _rangee(_texte(f'JOURNÉE DU {jour:%d/%m/%Y}', 'titre')),
         _rangee(),
-        _rangee(
-            _texte('Bénévole', 'gras'), _texte('Lieu du matin', 'gras'),
-            _texte('Heures AM', 'centre-gras'), _texte('Lieu du soir', 'gras'),
-            *(_texte(entete, 'centre-gras')
-              for entete in ('Heures PM', 'Heures JOUR', 'Déjeuner', 'Dîner'))),
+        _rangee(*entetes),
     ]
 
     premiere = len(rangees) + 1                     # première rangée de données (1-indexée)
     for decalage, ligne in enumerate(lignes):
         numero = premiere + decalage
-        rangees.append(_rangee(
-            _texte(ligne.nom),
-            _texte(ligne.lieu_matin), _nombre(ligne.am, 'centre'),
-            _texte(ligne.lieu_soir), _nombre(ligne.pm, 'centre'),
-            _formule(f'[.C{numero}]+[.E{numero}]', ligne.jour, 'centre'),
-            _formule(f'IF(OR([.C{numero}]>=nbHeureAM;[.F{numero}]>=nbHeureJour);1;0)',
-                     1 if ligne.dejeuner(seuils) else 0, 'centre'),
-            _formule(f'IF(OR([.E{numero}]>=nbHeurePM;[.F{numero}]>=nbHeureJour);1;0)',
-                     1 if ligne.diner(seuils) else 0, 'centre'),
-        ))
+        cellules = [_texte(ligne.nom)]
+        for plage in plages:
+            cellules += [_texte(ligne.lieux[plage.repas]),
+                         _nombre(ligne.heures[plage.repas], 'centre')]
+        for plage in plages:
+            valeur = 1 if ligne.a_droit(plage) else 0
+            if plage.fenetre_active:
+                # La présence pendant le repas dépend du détail des créneaux, que le tableur
+                # n'a pas : la cellule porte la valeur calculée, sans formule.
+                cellules.append(_nombre(valeur, 'centre'))
+            else:
+                cellules.append(_formule(
+                    f'IF([.{col_heures[plage.repas]}{numero}]>={_nom_seuil(plage)};1;0)',
+                    valeur, 'centre'))
+        rangees.append(_rangee(*cellules))
     derniere = premiere + len(lignes) - 1
 
-    par_lieu = totaux_par_lieu(lignes, seuils)
-    dejeuners = sum(compte[0] for compte in par_lieu.values())
-    diners = sum(compte[1] for compte in par_lieu.values())
+    par_lieu = totaux_par_lieu(lignes, regles)
+    totaux = {plage.repas: sum(compte[plage.repas] for compte in par_lieu.values())
+              for plage in plages}
 
     rangees.append(_rangee(
-        _texte('Total de la journée', 'gras'), _vide(5),
-        _formule(f'SUM([.G{premiere}:.G{derniere}])', dejeuners, 'centre-gras'),
-        _formule(f'SUM([.H{premiere}:.H{derniere}])', diners, 'centre-gras'),
-    ))
+        _texte('Total de la journée', 'gras'), _vide(2 * nombre),
+        *(_formule(f'SUM([.{col_repas[p.repas]}{premiere}:.{col_repas[p.repas]}{derniere}])',
+                   totaux[p.repas], 'centre-gras') for p in plages)))
     rangees.append(_rangee())
     rangees.append(_rangee(_texte('Repas par lieu', 'gras')))
-    rangees.append(_rangee(_texte('Lieu', 'gras'), _texte('Déjeuners', 'centre-gras'),
-                           _texte('Dîners', 'centre-gras')))
+    rangees.append(_rangee(_texte('Lieu', 'gras'),
+                           *(_texte(f'{p.nom_repas}s', 'centre-gras') for p in plages)))
+
+    def somme_du_lieu(plage, numero):
+        # Le lieu d'un repas est celui de sa plage : le déjeuner se compte sur la colonne
+        # « lieu du matin », le dîner sur « lieu du soir ».
+        repas, lieu = col_repas[plage.repas], col_lieu[plage.repas]
+        return (f'SUMIFS([.{repas}${premiere}:.{repas}${derniere}];'
+                f'[.{lieu}${premiere}:.{lieu}${derniere}];[.A{numero}])')
 
     premier_lieu = len(rangees) + 1
     for decalage, lieu in enumerate(lieux):
         numero = premier_lieu + decalage
-        attendus = par_lieu.get(lieu, (0, 0))
-        rangees.append(_rangee(
-            _texte(lieu),
-            # Le lieu du repas est celui de la demi-journée concernée : le déjeuner se
-            # compte sur la colonne « lieu du matin », le dîner sur « lieu du soir ».
-            _formule(f'SUMIFS([.G${premiere}:.G${derniere}];'
-                     f'[.B${premiere}:.B${derniere}];[.A{numero}])', attendus[0], 'centre'),
-            _formule(f'SUMIFS([.H${premiere}:.H${derniere}];'
-                     f'[.D${premiere}:.D${derniere}];[.A{numero}])', attendus[1], 'centre'),
-        ))
+        attendus = par_lieu.get(lieu, {})
+        rangees.append(_rangee(_texte(lieu), *(
+            _formule(somme_du_lieu(p, numero), attendus.get(p.repas, 0), 'centre')
+            for p in plages)))
     dernier_lieu = premier_lieu + len(lieux) - 1
 
-    rangees.append(_rangee(
-        _texte('Total', 'gras'),
-        _formule(f'SUM([.B{premier_lieu}:.B{dernier_lieu}])', dejeuners, 'centre-gras'),
-        _formule(f'SUM([.C{premier_lieu}:.C{dernier_lieu}])', diners, 'centre-gras'),
-    ))
+    rangees.append(_rangee(_texte('Total', 'gras'), *(
+        _formule(f'SUM([.{_colonne(1 + i)}{premier_lieu}:.{_colonne(1 + i)}{dernier_lieu}])',
+                 totaux[p.repas], 'centre-gras') for i, p in enumerate(plages))))
 
-    colonnes = ['col-large'] + ['col-moyenne'] * 7
+    colonnes = ['col-large'] + ['col-moyenne'] * (3 * nombre)
     return _feuille(_nom_feuille(jour), colonnes, rangees), premier_lieu
 
 
-def _feuille_recap(jours, lieux, premieres_rangees, seuils, genere_le):
+def _feuille_recap(jours, lieux, premieres_rangees, regles, genere_le):
     """Un tableau lieux × journées, pointant les totaux de chaque feuille de journée."""
+    plages = regles.plages
     entetes = [_texte('Lieu', 'gras')]
     for jour in jours:
-        entetes.append(_texte(f'{jour:%d/%m} déj.', 'centre-gras'))
-        entetes.append(_texte(f'{jour:%d/%m} dîn.', 'centre-gras'))
+        entetes += [_texte(f'{jour:%d/%m} {_abreviation(p)}', 'centre-gras') for p in plages]
 
     rangees = [
         _rangee(_texte('Repas à prévoir', 'titre')),
         _rangee(_texte(f'Mis à jour le {genere_le:%d/%m/%Y à %H:%M} — '
-                       f'seuils : {seuils.am:g} h le matin, {seuils.pm:g} h '
-                       f"l'après-midi, {seuils.jour:g} h dans la journée")),
+                       f'{regles.description()}')),
         _rangee(),
         _rangee(*entetes),
     ]
 
     premiere = len(rangees) + 1
-    totaux = {jour: totaux_par_lieu(lignes, seuils) for jour, lignes in jours.items()}
+    totaux = {jour: totaux_par_lieu(lignes, regles) for jour, lignes in jours.items()}
     for decalage, lieu in enumerate(lieux):
         cellules = [_texte(lieu)]
         for jour in jours:
             rangee_lieu = premieres_rangees[jour] + decalage
-            attendus = totaux[jour].get(lieu, (0, 0))
-            cellules.append(_formule(_reference(jour, f'B{rangee_lieu}'), attendus[0], 'centre'))
-            cellules.append(_formule(_reference(jour, f'C{rangee_lieu}'), attendus[1], 'centre'))
+            attendus = totaux[jour].get(lieu, {})
+            cellules += [_formule(_reference(jour, f'{_colonne(1 + i)}{rangee_lieu}'),
+                                  attendus.get(p.repas, 0), 'centre')
+                         for i, p in enumerate(plages)]
         rangees.append(_rangee(*cellules))
     derniere = premiere + len(lieux) - 1
 
-    totaux_colonnes = [_texte('Total', 'gras')]
-    for indice, jour in enumerate(jours):
-        for repas in range(2):
-            colonne = chr(ord('B') + indice * 2 + repas)
-            attendu = sum(compte[repas] for compte in totaux[jour].values())
-            totaux_colonnes.append(
-                _formule(f'SUM([.{colonne}{premiere}:.{colonne}{derniere}])', attendu,
-                         'centre-gras'))
-    rangees.append(_rangee(*totaux_colonnes))
+    cellules = [_texte('Total', 'gras')]
+    for indice_jour, jour in enumerate(jours):
+        for i, plage in enumerate(plages):
+            colonne = _colonne(1 + indice_jour * len(plages) + i)
+            attendu = sum(compte[plage.repas] for compte in totaux[jour].values())
+            cellules.append(_formule(f'SUM([.{colonne}{premiere}:.{colonne}{derniere}])',
+                                     attendu, 'centre-gras'))
+    rangees.append(_rangee(*cellules))
 
-    colonnes = ['col-large'] + ['col-moyenne'] * (2 * len(jours))
+    colonnes = ['col-large'] + ['col-moyenne'] * (len(plages) * len(jours))
     return _feuille('Récap', colonnes, rangees)
 
 
-def _feuille_variables(seuils):
-    """Les trois seuils, nommés : c'est ici que l'équipe ajuste les règles."""
+def _feuille_anomalies(anomalies):
+    """Les créneaux qui débordent des plages : à corriger ou à confirmer dans NOÉ."""
     rangees = [
-        _rangee(_texte('Variables', 'titre')),
-        _rangee(_texte('nbHeureAM'), _nombre(seuils.am),
-                _texte('heures le matin ouvrant droit au déjeuner')),
-        _rangee(_texte('nbHeurePM'), _nombre(seuils.pm),
-                _texte("heures l'après-midi ouvrant droit au dîner")),
-        _rangee(_texte('nbHeureJour'), _nombre(seuils.jour),
-                _texte('heures dans la journée ouvrant droit aux deux repas')),
+        _rangee(_texte('Anomalies — heures hors des plages horaires', 'titre')),
+        _rangee(_texte('Ces heures ne tombent dans aucune plage et ne comptent pour aucun '
+                       'repas : erreur de saisie ou heures de nuit, à vérifier dans NOÉ.')),
         _rangee(),
-        _rangee(_texte('Modifier une de ces valeurs recalcule tout le classeur.')),
+        _rangee(_texte('Bénévole', 'gras'), _texte('Lieu', 'gras'),
+                _texte('Début', 'centre-gras'), _texte('Fin', 'centre-gras'),
+                _texte('Heures hors plages', 'centre-gras')),
+    ]
+    for anomalie in anomalies:
+        creneau = anomalie.creneau
+        rangees.append(_rangee(
+            _texte(creneau.nom), _texte(creneau.lieu),
+            _texte(f'{creneau.debut:%d/%m %H:%M}', 'centre'),
+            _texte(f'{creneau.fin:%d/%m %H:%M}', 'centre'),
+            _nombre(anomalie.heures, 'centre')))
+    return _feuille('Anomalies', ['col-large', 'col-large'] + ['col-moyenne'] * 3, rangees)
+
+
+def _feuille_variables(regles):
+    """Les seuils, nommés — c'est ici que l'équipe les ajuste — puis les règles fixes."""
+    rangees = [_rangee(_texte('Variables', 'titre'))]
+    for plage in regles.plages:
+        rangees.append(_rangee(
+            _texte(_nom_seuil(plage)), _nombre(plage.seuil, 'centre'),
+            _texte(f'heures de présence du {plage.libelle} ({_hhmm(plage.debut)}–'
+                   f'{_hhmm(plage.fin)}) ouvrant droit au {plage.nom_repas.lower()}')))
+    rangees += [
+        _rangee(),
+        _rangee(_texte('Modifier un seuil recalcule tout le classeur.')),
         _rangee(_texte('Le fichier est régénéré automatiquement : une modification '
                        'sera écrasée à la prochaine mise à jour.')),
+        _rangee(),
+        _rangee(_texte('Règles appliquées au calcul (non modifiables ici)', 'gras')),
     ]
+    if regles.tolerance_arrondi is not None:
+        rangees.append(_rangee(_texte(
+            f'Heures de chaque plage arrondies à l\'heure : un reste de '
+            f'{regles.tolerance_arrondi} min ou moins part vers le bas, au-delà vers le haut.')))
+    for plage in regles.plages:
+        if plage.fenetre:
+            etat = (f'active, ≥ {plage.presence_fenetre:g} h de présence'
+                    if plage.fenetre_active else 'désactivée')
+            rangees.append(_rangee(_texte(
+                f'Fenêtre du {plage.nom_repas.lower()} ({_hhmm(plage.fenetre[0])}–'
+                f'{_hhmm(plage.fenetre[1])}) : {etat}.')))
     return _feuille('Variables', ['col-large', 'col-moyenne', 'col-large'], rangees)
 
 
-def _plages_nommees():
-    """`nbHeureAM` & co. — les noms utilisés par les formules des feuilles de journée."""
+def _plages_nommees(regles):
+    """Les seuils nommés, utilisés par les formules des feuilles de journée."""
     noms = ''.join(
-        f'<table:named-range table:name="{nom}" '
-        f'table:base-cell-address="$Variables.$B${rangee}" '
-        f'table:cell-range-address="$Variables.$B${rangee}"/>'
-        for nom, rangee in (('nbHeureAM', 2), ('nbHeurePM', 3), ('nbHeureJour', 4)))
+        f'<table:named-range table:name="{_nom_seuil(plage)}" '
+        f'table:base-cell-address="$Variables.$B${2 + i}" '
+        f'table:cell-range-address="$Variables.$B${2 + i}"/>'
+        for i, plage in enumerate(regles.plages))
     return f'<table:named-expressions>{noms}</table:named-expressions>'
 
 
 # === Assemblage ===
 
-def _contenu(jours, seuils, genere_le):
+def _contenu(jours, regles, anomalies, genere_le):
     lieux = _lieux_du_classeur(jours)
     feuilles = []
     premieres_rangees = {}
     for jour, lignes in jours.items():
-        xml, premiere = _feuille_journee(jour, lignes, lieux, seuils)
+        xml, premiere = _feuille_journee(jour, lignes, lieux, regles)
         feuilles.append(xml)
         premieres_rangees[jour] = premiere
 
-    corps = (_feuille_recap(jours, lieux, premieres_rangees, seuils, genere_le)
-             + ''.join(feuilles) + _feuille_variables(seuils) + _plages_nommees())
+    corps = (_feuille_recap(jours, lieux, premieres_rangees, regles, genere_le)
+             + ''.join(feuilles)
+             + (_feuille_anomalies(anomalies) if anomalies else '')
+             + _feuille_variables(regles) + _plages_nommees(regles))
 
     return ('<?xml version="1.0" encoding="UTF-8"?>'
             f'<office:document-content {_ESPACES_DE_NOMS} office:version="1.3">'
@@ -291,7 +359,7 @@ def _meta(genere_le):
     return ('<?xml version="1.0" encoding="UTF-8"?>'
             f'<office:document-meta {_ESPACES_DE_NOMS} office:version="1.3">'
             '<office:meta><meta:generator>noe-outils/catering</meta:generator>'
-            f'<dc:title>Repas à prévoir</dc:title>'
+            '<dc:title>Repas à prévoir</dc:title>'
             f'<dc:date>{genere_le:%Y-%m-%dT%H:%M:%S}</dc:date>'
             '</office:meta></office:document-meta>')
 
@@ -310,13 +378,14 @@ _MANIFESTE = (
 )
 
 
-def ecrire_classeur(chemin, jours, seuils=SEUILS_DEFAUT, genere_le=None):
+def ecrire_classeur(chemin, jours, regles=REGLES_BENEVOLES, anomalies=(), genere_le=None):
     """Écrit le classeur des repas.
 
     Args:
         chemin: fichier `.ods` à écrire (écrasé s'il existe)
         jours: {date: [Ligne]} — cf. `calcul.tableau()`
-        seuils: les trois variables, recopiées dans la feuille « Variables »
+        regles: les règles appliquées, dont les seuils recopiés dans « Variables »
+        anomalies: `calcul.releve_anomalies()` — une feuille dédiée s'il y en a
         genere_le: horodatage affiché dans le récapitulatif (maintenant par défaut)
     """
     if not jours:
@@ -329,7 +398,7 @@ def ecrire_classeur(chemin, jours, seuils=SEUILS_DEFAUT, genere_le=None):
         archive.writestr(zipfile.ZipInfo('mimetype'), MIMETYPE,
                          compress_type=zipfile.ZIP_STORED)
         archive.writestr('META-INF/manifest.xml', _MANIFESTE)
-        archive.writestr('content.xml', _contenu(jours, seuils, genere_le))
+        archive.writestr('content.xml', _contenu(jours, regles, anomalies, genere_le))
         archive.writestr('styles.xml', _styles())
         archive.writestr('meta.xml', _meta(genere_le))
     return chemin
