@@ -144,7 +144,7 @@ def _lieux_du_classeur(jours):
     return ordinaires + ([SANS_LIEU] if SANS_LIEU in lieux else [])
 
 
-def _feuille_journee(jour, lignes, lieux, regles):
+def _feuille_journee(jour, lignes, lieux, regles, profils=None, regimes=REGIMES):
     """Une journée : le détail par personne, puis le récapitulatif par lieu.
 
     Colonnes : A nom ; puis, par plage, lieu, heures de bénévolat et encadrement (1 ou 0) ;
@@ -228,6 +228,18 @@ def _feuille_journee(jour, lignes, lieux, regles):
         _formule(f'SUM([.{_colonne(1 + i)}{premier_lieu}:.{_colonne(1 + i)}{dernier_lieu}])',
                  totaux[p.repas], 'centre-gras') for i, p in enumerate(plages))))
 
+    if profils is not None:
+        # Sous le bloc des lieux, pour ne pas déplacer les cellules que le récapitulatif
+        # pointe. Mêmes chiffres que l'onglet « Régimes », limités à la journée.
+        rangees += [
+            _rangee(),
+            _rangee(_texte('Régimes par lieu', 'gras')),
+            _rangee(_texte('Comptés à la génération, avec les seuils en vigueur : un seuil '
+                           'modifié dans « Variables » ne les recalcule pas. Règles détaillées '
+                           'dans l\'onglet « Régimes ».')),
+            *_rangees_regimes({jour: lignes}, profils, regles, regimes, avec_jour=False),
+        ]
+
     colonnes = ['col-large'] + ['col-moyenne'] * (4 * nombre)
     return _feuille(_nom_feuille(jour), colonnes, rangees), premier_lieu
 
@@ -298,36 +310,24 @@ def _feuille_anomalies(anomalies):
                     rangees)
 
 
-def _feuille_regimes(jours, profils, regles, regimes):
-    """Régimes et exceptions : comptages par repas servi, puis la liste pour la cuisine.
+def _rangees_regimes(jours, profils, regles, regimes, avec_jour):
+    """Comptages de régimes par repas et lieu, puis la liste à signaler en cuisine.
 
-    Données sensibles (article 9 du RGPD) : elles restent confinées à cette feuille, sous
-    la mention de diffusion restreinte. Les comptages sont écrits en valeurs, avec les
-    seuils en vigueur à la génération — le tableur n'a pas le régime de chaque personne.
+    Partagé par l'onglet « Régimes » (toutes les journées, avec une colonne Jour) et le bas
+    de chaque feuille de journée : les mêmes chiffres aux deux endroits.
     """
     categories = regimes.colonnes()
-    rangees = [
-        _rangee(_texte('Régimes et exceptions alimentaires', 'titre')),
-        _rangee(_texte(MENTION_RGPD, 'gras')),
-        _rangee(_texte('Comptés sur les repas accordés, avec les seuils en vigueur à la '
-                       'génération : modifier un seuil dans « Variables » ne recalcule pas '
-                       'cette feuille.')),
-        _rangee(_texte('Régime : champ du formulaire d\'inscription. Exceptions : tags posés '
-                       'par l\'équipe dans NOÉ. « Inconnu » : encadrant sans inscription '
-                       'reliée.')),
-        _rangee(_texte(f'Flexi-vegan : comptés avec les {regimes.flexi_prefere.lower()}s '
-                       'quand il y en a sur le même repas et le même lieu, sinon avec les '
-                       f'{regimes.flexi_repli.lower()}s (colonne « Dont flexi »).')),
-        _rangee(),
-        _rangee(_texte('Jour', 'gras'), _texte('Repas', 'gras'), _texte('Lieu', 'gras'),
-                _texte('Repas servis', 'centre-gras'),
-                *(_texte(categorie, 'centre-gras') for categorie in categories),
-                _texte('Dont flexi', 'centre-gras'),
-                _texte('Avec exception', 'centre-gras')),
-    ]
+    entete_jour = [_texte('Jour', 'gras')] if avec_jour else []
+
+    rangees = [_rangee(
+        *entete_jour, _texte('Repas', 'gras'), _texte('Lieu', 'gras'),
+        _texte('Repas servis', 'centre-gras'),
+        *(_texte(categorie, 'centre-gras') for categorie in categories),
+        _texte('Dont flexi', 'centre-gras'), _texte('Avec exception', 'centre-gras'))]
     for ligne in repartition(jours, profils, regles, regimes):
         rangees.append(_rangee(
-            _texte(f'{ligne.jour:%d/%m}'), _texte(ligne.plage.nom_repas), _texte(ligne.lieu),
+            *([_texte(f'{ligne.jour:%d/%m}')] if avec_jour else []),
+            _texte(ligne.plage.nom_repas), _texte(ligne.lieu),
             _nombre(sum(ligne.categories.values()), 'centre'),
             *(_nombre(ligne.categories.get(categorie, 0), 'centre') for categorie in categories),
             _nombre(ligne.dont_flexi, 'centre'),
@@ -339,18 +339,44 @@ def _feuille_regimes(jours, profils, regles, regimes):
                        'gras')),
     ]
     a_signaler = signalements(jours, profils, regles)
-    if a_signaler:
-        rangees.append(_rangee(*(_texte(entete, 'gras') for entete in (
-            'Jour', 'Repas', 'Lieu', 'Nom', 'Exceptions', 'Régime déclaré'))))
-        for signalement in a_signaler:
-            rangees.append(_rangee(
-                _texte(f'{signalement.jour:%d/%m}'), _texte(signalement.plage.nom_repas),
-                _texte(signalement.lieu), _texte(signalement.nom),
-                _texte(', '.join(signalement.exceptions)), _texte(signalement.declaration)))
-    else:
-        rangees.append(_rangee(_texte('Personne à signaler.')))
+    if not a_signaler:
+        return rangees + [_rangee(_texte('Personne à signaler.'))]
+    rangees.append(_rangee(*entete_jour, *(_texte(entete, 'gras') for entete in (
+        'Repas', 'Lieu', 'Nom', 'Exceptions', 'Régime déclaré'))))
+    for signalement in a_signaler:
+        rangees.append(_rangee(
+            *([_texte(f'{signalement.jour:%d/%m}')] if avec_jour else []),
+            _texte(signalement.plage.nom_repas), _texte(signalement.lieu),
+            _texte(signalement.nom), _texte(', '.join(signalement.exceptions)),
+            _texte(signalement.declaration)))
+    return rangees
 
-    colonnes = ['col-moyenne', 'col-moyenne'] + ['col-large'] * 4 + ['col-moyenne'] * len(categories)
+
+def _feuille_regimes(jours, profils, regles, regimes):
+    """Récapitulatif des régimes et exceptions, toutes journées confondues.
+
+    Données sensibles (article 9 du RGPD), sous la mention de diffusion restreinte ; les
+    mêmes blocs figurent au bas de chaque feuille de journée. Comptages écrits en valeurs,
+    avec les seuils en vigueur à la génération : le tableur n'a pas le régime de chaque
+    personne, et la répartition des flexi-vegans ne s'écrit pas en formule.
+    """
+    rangees = [
+        _rangee(_texte('Régimes et exceptions alimentaires', 'titre')),
+        _rangee(_texte(MENTION_RGPD, 'gras')),
+        _rangee(_texte('Comptés sur les repas accordés, avec les seuils en vigueur à la '
+                       'génération : modifier un seuil dans « Variables » ne recalcule pas '
+                       'ces comptages, ici comme en bas des journées.')),
+        _rangee(_texte('Régime : champ du formulaire d\'inscription. Exceptions : tags posés '
+                       'par l\'équipe dans NOÉ. « Inconnu » : encadrant sans inscription '
+                       'reliée.')),
+        _rangee(_texte(f'Flexi-vegan : comptés avec les {regimes.flexi_prefere.lower()}s '
+                       'quand il y en a sur le même repas et le même lieu, sinon avec les '
+                       f'{regimes.flexi_repli.lower()}s (colonne « Dont flexi »).')),
+        _rangee(),
+        *_rangees_regimes(jours, profils, regles, regimes, avec_jour=True),
+    ]
+    colonnes = (['col-moyenne', 'col-moyenne'] + ['col-large'] * 4
+                + ['col-moyenne'] * len(regimes.colonnes()))
     return _feuille('Régimes', colonnes, rangees)
 
 
@@ -407,7 +433,7 @@ def _contenu(jours, regles, regles_encadrants, anomalies, genere_le, profils, re
     feuilles = []
     premieres_rangees = {}
     for jour, lignes in jours.items():
-        xml, premiere = _feuille_journee(jour, lignes, lieux, regles)
+        xml, premiere = _feuille_journee(jour, lignes, lieux, regles, profils, regimes)
         feuilles.append(xml)
         premieres_rangees[jour] = premiere
 

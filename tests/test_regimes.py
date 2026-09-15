@@ -110,6 +110,20 @@ class TestComptages(unittest.TestCase):
     def test_rapport_sans_profils(self):
         self.assertNotIn('Régimes', '\n'.join(resume(self.jours)))
 
+    def test_blocs_regimes_en_bas_des_journees(self):
+        contenu = self.ecrire(profils=self.profils)
+        journee = contenu[contenu.index('table:name="2026-09-26"'):]
+        journee = journee[:journee.index('</table:table>')]
+        self.assertIn('Régimes par lieu', journee)
+        self.assertIn('À signaler en cuisine', journee)
+        self.assertIn('pas de fromage', journee)            # la liste du jour
+        self.assertIn('Dont flexi', journee)
+        # Sous le bloc des lieux, dont le récapitulatif pointe les cellules.
+        self.assertLess(journee.index('Repas par lieu'), journee.index('Régimes par lieu'))
+
+    def test_journees_sans_regimes_sans_blocs(self):
+        self.assertNotIn('Régimes par lieu', self.ecrire())
+
     def test_tags_utilises(self):
         self.assertEqual(tags_utilises([{'tags': ['Sans gluten', ' ']}, {'tags': ['Sans gluten']},
                                         {}]), Counter({'Sans gluten': 2}))
