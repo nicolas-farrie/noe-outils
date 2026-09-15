@@ -11,9 +11,12 @@ noms ne figurent que dans le classeur remis à l'équipe.
 
 import argparse
 import os
+import sys
+from collections import Counter
 
 from .calcul import (creneaux_depuis_noe, creneaux_encadrement, encadrements_sans_espace,
                      releve_anomalies, tableau, totaux_du_jour, totaux_par_lieu)
+from .regimes import REGIMES, champ_regime, profils_alimentaires, repartition, signalements
 from .regles import REGLES_BENEVOLES
 
 VARIABLES = ('NOE_URL', 'NOE_TOKEN', 'NOE_PROJECT_ID')
@@ -34,7 +37,7 @@ def client_depuis_environnement():
 
 
 def lire(client):
-    """(créneaux, lectures) — les listes de l'API, croisées côté client.
+    """(créneaux, profils alimentaires, lectures) — les listes de l'API, croisées côté client.
 
     Les filtres de NOÉ ne traversent pas les références : on lit tout, on croise ici.
     """
@@ -44,7 +47,18 @@ def lire(client):
     fiches = client.list_stewards()
     benevolat = creneaux_depuis_noe(sessions, inscriptions, lieux)
     encadrement = creneaux_encadrement(sessions, inscriptions, fiches, lieux)
-    return benevolat + encadrement, {
+
+    cle_regime = champ_regime(client.form_fields())
+    if cle_regime is None:
+        # Le formulaire a changé : on sert quand même les repas, sans les régimes, plutôt
+        # que de laisser l'équipe sans tableau.
+        print('Attention : champ « régime alimentaire » introuvable dans le formulaire NOÉ, '
+              'classeur produit sans les régimes.', file=sys.stderr)
+        profils = None
+    else:
+        profils = profils_alimentaires(inscriptions, cle_regime)
+
+    return benevolat + encadrement, profils, {
         'lieux': len(lieux), 'sessions': len(sessions), 'inscriptions': len(inscriptions),
         'créneaux souscrits': len(benevolat), 'encadrants': len(fiches),
         'encadrements': len(encadrement)}
@@ -54,7 +68,8 @@ def _comptes(totaux, regles):
     return ', '.join(f'{totaux[p.repas]} {p.nom_repas.lower()}(s)' for p in regles.plages)
 
 
-def resume(jours, regles=REGLES_BENEVOLES, anomalies=(), sans_espace=0):
+def resume(jours, regles=REGLES_BENEVOLES, anomalies=(), sans_espace=0, profils=None,
+           regimes=REGIMES):
     """Le rapport de contrôle, en lignes de texte : des comptages, jamais de noms."""
     lignes_rapport = []
     cumul = {plage.repas: 0 for plage in regles.plages}
@@ -73,6 +88,17 @@ def resume(jours, regles=REGLES_BENEVOLES, anomalies=(), sans_espace=0):
     lignes_rapport.append(f'Total : {len(jours)} journée(s), ' + _comptes(cumul, regles))
     if sans_espace:
         lignes_rapport.append(f'Encadrements sans espace, sans repas : {sans_espace}')
+    if profils is not None:
+        categories = Counter()
+        for ligne in repartition(jours, profils, regles):
+            categories.update(ligne.categories)
+        lignes_rapport.append('Régimes (repas accordés) : ' + ', '.join(
+            f'{categorie} {categories[categorie]}' for categorie in regimes.colonnes()))
+        tags = Counter(tag for signalement in signalements(jours, profils, regles)
+                       for tag in signalement.exceptions)
+        if tags:
+            lignes_rapport.append('Exceptions (repas accordés) : ' + ', '.join(
+                f'{tag} {nombre}' for tag, nombre in sorted(tags.items())))
     if anomalies:
         heures = round(sum(anomalie.heures for anomalie in anomalies), 2)
         lignes_rapport.append(
@@ -104,18 +130,18 @@ def main(arguments=None):
 
     regles = REGLES_BENEVOLES.avec_seuils(dejeuner=options.seuil_dejeuner,
                                           diner=options.seuil_diner)
-    creneaux, lectures = lire(client_depuis_environnement())
+    creneaux, profils, lectures = lire(client_depuis_environnement())
     jours = tableau(creneaux, regles)
     anomalies = releve_anomalies(creneaux, regles)
 
     print(', '.join(f'{valeur} {nom}' for nom, valeur in lectures.items()))
-    for ligne in resume(jours, regles, anomalies, encadrements_sans_espace(creneaux)):
+    for ligne in resume(jours, regles, anomalies, encadrements_sans_espace(creneaux), profils):
         print(ligne)
 
     if options.out:
         # Import tardif : le rapport seul n'a pas besoin du générateur de classeur.
         from .ods import ecrire_classeur
-        ecrire_classeur(options.out, jours, regles, anomalies)
+        ecrire_classeur(options.out, jours, regles, anomalies, profils=profils)
         print(f'Classeur écrit : {options.out}')
     return 0
 

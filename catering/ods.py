@@ -22,6 +22,7 @@ from datetime import datetime
 from xml.sax.saxutils import escape, quoteattr
 
 from .calcul import SANS_LIEU, totaux_par_lieu
+from .regimes import MENTION_RGPD, REGIMES, repartition, signalements
 from .regles import REGLES_BENEVOLES, REGLES_ENCADRANTS, _hhmm
 
 MIMETYPE = 'application/vnd.oasis.opendocument.spreadsheet'
@@ -230,7 +231,8 @@ def _feuille_journee(jour, lignes, lieux, regles):
     return _feuille(_nom_feuille(jour), colonnes, rangees), premier_lieu
 
 
-def _feuille_recap(jours, lieux, premieres_rangees, regles, regles_encadrants, genere_le):
+def _feuille_recap(jours, lieux, premieres_rangees, regles, regles_encadrants, genere_le,
+                   mention=None):
     """Un tableau lieux × journées, pointant les totaux de chaque feuille de journée."""
     plages = regles.plages
     entetes = [_texte('Lieu', 'gras')]
@@ -239,6 +241,7 @@ def _feuille_recap(jours, lieux, premieres_rangees, regles, regles_encadrants, g
 
     rangees = [
         _rangee(_texte('Repas à prévoir', 'titre')),
+        *([_rangee(_texte(mention, 'gras'))] if mention else []),
         _rangee(_texte(f'Mis à jour le {genere_le:%d/%m/%Y à %H:%M}')),
         _rangee(_texte(f'Bénévoles — {regles.description()}')),
         _rangee(_texte(f'Encadrants sur un espace — {regles_encadrants.description()}')),
@@ -294,6 +297,57 @@ def _feuille_anomalies(anomalies):
                     rangees)
 
 
+def _feuille_regimes(jours, profils, regles, regimes):
+    """Régimes et exceptions : comptages par repas servi, puis la liste pour la cuisine.
+
+    Données sensibles (article 9 du RGPD) : elles restent confinées à cette feuille, sous
+    la mention de diffusion restreinte. Les comptages sont écrits en valeurs, avec les
+    seuils en vigueur à la génération — le tableur n'a pas le régime de chaque personne.
+    """
+    categories = regimes.colonnes()
+    rangees = [
+        _rangee(_texte('Régimes et exceptions alimentaires', 'titre')),
+        _rangee(_texte(MENTION_RGPD, 'gras')),
+        _rangee(_texte('Comptés sur les repas accordés, avec les seuils en vigueur à la '
+                       'génération : modifier un seuil dans « Variables » ne recalcule pas '
+                       'cette feuille.')),
+        _rangee(_texte('Régime : champ du formulaire d\'inscription. Exceptions : tags posés '
+                       'par l\'équipe dans NOÉ. « Inconnu » : encadrant sans inscription '
+                       'reliée.')),
+        _rangee(),
+        _rangee(_texte('Jour', 'gras'), _texte('Repas', 'gras'), _texte('Lieu', 'gras'),
+                _texte('Repas servis', 'centre-gras'),
+                *(_texte(categorie, 'centre-gras') for categorie in categories),
+                _texte('Avec exception', 'centre-gras')),
+    ]
+    for ligne in repartition(jours, profils, regles):
+        rangees.append(_rangee(
+            _texte(f'{ligne.jour:%d/%m}'), _texte(ligne.plage.nom_repas), _texte(ligne.lieu),
+            _nombre(sum(ligne.categories.values()), 'centre'),
+            *(_nombre(ligne.categories.get(categorie, 0), 'centre') for categorie in categories),
+            _nombre(ligne.avec_exception, 'centre')))
+
+    rangees += [
+        _rangee(),
+        _rangee(_texte('À signaler en cuisine — exceptions alimentaires et régimes à vérifier',
+                       'gras')),
+    ]
+    a_signaler = signalements(jours, profils, regles)
+    if a_signaler:
+        rangees.append(_rangee(*(_texte(entete, 'gras') for entete in (
+            'Jour', 'Repas', 'Lieu', 'Nom', 'Exceptions', 'Régime déclaré'))))
+        for signalement in a_signaler:
+            rangees.append(_rangee(
+                _texte(f'{signalement.jour:%d/%m}'), _texte(signalement.plage.nom_repas),
+                _texte(signalement.lieu), _texte(signalement.nom),
+                _texte(', '.join(signalement.exceptions)), _texte(signalement.declaration)))
+    else:
+        rangees.append(_rangee(_texte('Personne à signaler.')))
+
+    colonnes = ['col-moyenne', 'col-moyenne'] + ['col-large'] * 4 + ['col-moyenne'] * len(categories)
+    return _feuille('Régimes', colonnes, rangees)
+
+
 def _feuille_variables(regles, regles_encadrants):
     """Les seuils, nommés — c'est ici que l'équipe les ajuste — puis les règles fixes."""
     rangees = [_rangee(_texte('Variables', 'titre'))]
@@ -342,7 +396,7 @@ def _plages_nommees(regles):
 
 # === Assemblage ===
 
-def _contenu(jours, regles, regles_encadrants, anomalies, genere_le):
+def _contenu(jours, regles, regles_encadrants, anomalies, genere_le, profils, regimes):
     lieux = _lieux_du_classeur(jours)
     feuilles = []
     premieres_rangees = {}
@@ -351,9 +405,12 @@ def _contenu(jours, regles, regles_encadrants, anomalies, genere_le):
         feuilles.append(xml)
         premieres_rangees[jour] = premiere
 
+    # La mention RGPD n'a de sens que si le classeur porte les régimes.
+    avec_regimes = profils is not None
     corps = (_feuille_recap(jours, lieux, premieres_rangees, regles, regles_encadrants,
-                            genere_le)
+                            genere_le, MENTION_RGPD if avec_regimes else None)
              + ''.join(feuilles)
+             + (_feuille_regimes(jours, profils, regles, regimes) if avec_regimes else '')
              + (_feuille_anomalies(anomalies) if anomalies else '')
              + _feuille_variables(regles, regles_encadrants) + _plages_nommees(regles))
 
@@ -395,7 +452,7 @@ _MANIFESTE = (
 
 
 def ecrire_classeur(chemin, jours, regles=REGLES_BENEVOLES, anomalies=(), genere_le=None,
-                    regles_encadrants=REGLES_ENCADRANTS):
+                    regles_encadrants=REGLES_ENCADRANTS, profils=None, regimes=REGIMES):
     """Écrit le classeur des repas.
 
     Args:
@@ -405,6 +462,9 @@ def ecrire_classeur(chemin, jours, regles=REGLES_BENEVOLES, anomalies=(), genere
         anomalies: `calcul.releve_anomalies()` — une feuille dédiée s'il y en a
         genere_le: horodatage affiché dans le récapitulatif (maintenant par défaut)
         regles_encadrants: règles des encadrants, rappelées dans le classeur
+        profils: `regimes.profils_alimentaires()` — ajoute la feuille « Régimes » et la
+                 mention RGPD ; None, classeur sans régimes
+        regimes: le classement des régimes, pour l'ordre des colonnes
     """
     if not jours:
         raise ValueError('aucune journée à écrire')
@@ -417,7 +477,8 @@ def ecrire_classeur(chemin, jours, regles=REGLES_BENEVOLES, anomalies=(), genere
                          compress_type=zipfile.ZIP_STORED)
         archive.writestr('META-INF/manifest.xml', _MANIFESTE)
         archive.writestr('content.xml',
-                         _contenu(jours, regles, regles_encadrants, anomalies, genere_le))
+                         _contenu(jours, regles, regles_encadrants, anomalies, genere_le,
+                                  profils, regimes))
         archive.writestr('styles.xml', _styles())
         archive.writestr('meta.xml', _meta(genere_le))
     return chemin
