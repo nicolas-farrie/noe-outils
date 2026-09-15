@@ -12,8 +12,8 @@ noms ne figurent que dans le classeur remis à l'équipe.
 import argparse
 import os
 
-from .calcul import (creneaux_depuis_noe, releve_anomalies, tableau, totaux_du_jour,
-                     totaux_par_lieu)
+from .calcul import (creneaux_depuis_noe, creneaux_encadrement, encadrements_sans_espace,
+                     releve_anomalies, tableau, totaux_du_jour, totaux_par_lieu)
 from .regles import REGLES_BENEVOLES
 
 VARIABLES = ('NOE_URL', 'NOE_TOKEN', 'NOE_PROJECT_ID')
@@ -34,23 +34,27 @@ def client_depuis_environnement():
 
 
 def lire(client):
-    """(créneaux, lectures) — les trois listes de l'API, croisées côté client.
+    """(créneaux, lectures) — les listes de l'API, croisées côté client.
 
     Les filtres de NOÉ ne traversent pas les références : on lit tout, on croise ici.
     """
     lieux = {lieu['_id']: lieu.get('name') or '(sans nom)' for lieu in client.list_places()}
     sessions = client.list_sessions()
     inscriptions = client.list_registrations()
-    creneaux = creneaux_depuis_noe(sessions, inscriptions, lieux)
-    return creneaux, {'lieux': len(lieux), 'sessions': len(sessions),
-                      'inscriptions': len(inscriptions), 'créneaux souscrits': len(creneaux)}
+    fiches = client.list_stewards()
+    benevolat = creneaux_depuis_noe(sessions, inscriptions, lieux)
+    encadrement = creneaux_encadrement(sessions, inscriptions, fiches, lieux)
+    return benevolat + encadrement, {
+        'lieux': len(lieux), 'sessions': len(sessions), 'inscriptions': len(inscriptions),
+        'créneaux souscrits': len(benevolat), 'encadrants': len(fiches),
+        'encadrements': len(encadrement)}
 
 
 def _comptes(totaux, regles):
     return ', '.join(f'{totaux[p.repas]} {p.nom_repas.lower()}(s)' for p in regles.plages)
 
 
-def resume(jours, regles=REGLES_BENEVOLES, anomalies=()):
+def resume(jours, regles=REGLES_BENEVOLES, anomalies=(), sans_espace=0):
     """Le rapport de contrôle, en lignes de texte : des comptages, jamais de noms."""
     lignes_rapport = []
     cumul = {plage.repas: 0 for plage in regles.plages}
@@ -59,13 +63,16 @@ def resume(jours, regles=REGLES_BENEVOLES, anomalies=()):
         totaux = totaux_du_jour(lignes, regles)
         for repas, nombre in totaux.items():
             cumul[repas] += nombre
-        lignes_rapport.append(f'{jour:%d/%m/%Y} — {len(lignes)} bénévole(s) présent(s), '
-                              + _comptes(totaux, regles))
+        encadrants = sum(1 for ligne in lignes if any(ligne.encadre.values()))
+        lignes_rapport.append(f'{jour:%d/%m/%Y} — {len(lignes)} présent(s) dont '
+                              f'{encadrants} encadrant(s), ' + _comptes(totaux, regles))
         for lieu, compte in totaux_par_lieu(lignes, regles).items():
             lignes_rapport.append(f'    {lieu[:34]:<34}' + ''.join(
                 f' {compte[p.repas]:>3} {p.nom_repas[:3].lower()}.' for p in regles.plages))
 
     lignes_rapport.append(f'Total : {len(jours)} journée(s), ' + _comptes(cumul, regles))
+    if sans_espace:
+        lignes_rapport.append(f'Encadrements sans espace, sans repas : {sans_espace}')
     if anomalies:
         heures = round(sum(anomalie.heures for anomalie in anomalies), 2)
         lignes_rapport.append(
@@ -102,7 +109,7 @@ def main(arguments=None):
     anomalies = releve_anomalies(creneaux, regles)
 
     print(', '.join(f'{valeur} {nom}' for nom, valeur in lectures.items()))
-    for ligne in resume(jours, regles, anomalies):
+    for ligne in resume(jours, regles, anomalies, encadrements_sans_espace(creneaux)):
         print(ligne)
 
     if options.out:

@@ -116,6 +116,15 @@ class NoeClient:
         """Les lieux du projet, référencés par `session.places` (liste, souvent vide)."""
         return self._list(self._project_endpoint('places'))
 
+    def list_stewards(self):
+        """Les fiches encadrant·es : prénom, nom, téléphone — sans compte NOÉ.
+
+        L'affectation réelle est `session.stewards` ; `activity.stewards` ne liste que les
+        encadrant·es « éligibles ». Une inscription peut pointer vers sa fiche par
+        `registration.steward`.
+        """
+        return self._list(self._project_endpoint('stewards'))
+
     def list_registrations(self):
         """Les inscriptions au projet (avec user et sessionsSubscriptions)."""
         return self._list(self._project_endpoint('registrations'))

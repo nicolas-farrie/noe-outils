@@ -5,8 +5,8 @@ horaires, seuils et arrondi ont déjà changé deux fois avant l'événement. El
 ici, et `calcul.py` ne fait que les appliquer — changer une règle revient à changer une
 valeur, pas du code.
 
-Une instance de `Regles` par population : les bénévoles aujourd'hui, les encadrants
-ensuite, avec leurs propres plages (celles des encadrants se chevauchent, volontairement).
+Une instance de `Regles` par population — bénévoles et encadrants —, chacune avec ses
+plages (celles des encadrants se chevauchent, volontairement).
 
 Règles des bénévoles, arrêtées avec l'équipe le 15/09/2026 :
 
@@ -57,6 +57,8 @@ class Plage:
         if not 0 <= self.debut < self.fin <= self.debut + 24:
             raise ValueError(f'plage {self.libelle!r} : bornes incohérentes '
                              f'({self.debut} → {self.fin})')
+        if self.seuil < 0:
+            raise ValueError(f'plage {self.libelle!r} : seuil négatif ({self.seuil})')
         if self.fenetre and not self.debut <= self.fenetre[0] < self.fenetre[1] <= self.fin:
             raise ValueError(f'plage {self.libelle!r} : la fenêtre du repas '
                              f'{self.fenetre} sort de la plage')
@@ -66,8 +68,12 @@ class Plage:
         return bool(self.fenetre and self.presence_fenetre)
 
     def description(self):
-        texte = (f'{self.nom_repas.lower()} : ≥ {self.seuil:g} h entre {_hhmm(self.debut)} '
-                 f'et {_hhmm(self.fin)}')
+        if self.seuil:
+            texte = (f'{self.nom_repas.lower()} : ≥ {self.seuil:g} h entre '
+                     f'{_hhmm(self.debut)} et {_hhmm(self.fin)}')
+        else:
+            texte = (f'{self.nom_repas.lower()} : présence entre {_hhmm(self.debut)} '
+                     f'et {_hhmm(self.fin)}')
         if self.fenetre_active:
             texte += (f', ou ≥ {self.presence_fenetre:g} h entre {_hhmm(self.fenetre[0])} '
                       f'et {_hhmm(self.fenetre[1])}')
@@ -114,3 +120,12 @@ REGLES_BENEVOLES = Regles(plages=(
     Plage('dejeuner', 'Déjeuner', 'matin', debut=8, fin=16, seuil=2, fenetre=(12, 14)),
     Plage('diner', 'Dîner', 'soir', debut=16, fin=27, seuil=2, fenetre=(19, 21.5)),
 ))
+
+# Encadrants : le repas de chaque plage que touche une session qu'ils encadrent, quelle que
+# soit la durée — ils sont d'astreinte. Le soir commence dès 14:00 : le chevauchement avec le
+# matin est voulu par l'équipe (encadrer de 14 h à 15 h ouvre les deux repas). Pas
+# d'arrondi : sans seuil, il n'a pas d'objet.
+REGLES_ENCADRANTS = Regles(plages=(
+    Plage('dejeuner', 'Déjeuner', 'matin', debut=8, fin=16, seuil=0),
+    Plage('diner', 'Dîner', 'soir', debut=14, fin=27, seuil=0),
+), tolerance_arrondi=None)

@@ -68,15 +68,17 @@ class TestClasseur(unittest.TestCase):
             self.assertIn(f'table:named-range table:name="{nom}"', self.contenu)
 
     def test_formules_de_la_premiere_ligne(self):
-        # Colonnes : A nom, B lieu du matin, C heures matin, D lieu du soir, E heures soir,
-        # F déjeuner, G dîner.
-        self.assertIn('of:=IF([.C4]&gt;=seuilDejeuner;1;0)', self.contenu)
-        self.assertIn('of:=IF([.E4]&gt;=seuilDiner;1;0)', self.contenu)
-        self.assertIn('of:=SUMIFS([.F$4:.F$5];[.B$4:.B$5];', self.contenu)
-        self.assertIn('of:=SUMIFS([.G$4:.G$5];[.D$4:.D$5];', self.contenu)
+        # Colonnes : A nom ; B lieu, C heures, D encadre (matin) ; E lieu, F heures,
+        # G encadre (soir) ; H déjeuner, I dîner.
+        self.assertIn('of:=IF(OR(AND([.C4]&gt;0;[.C4]&gt;=seuilDejeuner);[.D4]=1);1;0)',
+                      self.contenu)
+        self.assertIn('of:=IF(OR(AND([.F4]&gt;0;[.F4]&gt;=seuilDiner);[.G4]=1);1;0)',
+                      self.contenu)
+        self.assertIn('of:=SUMIFS([.H$4:.H$5];[.B$4:.B$5];', self.contenu)
+        self.assertIn('of:=SUMIFS([.I$4:.I$5];[.E$4:.E$5];', self.contenu)
 
     def test_colonnes_de_resultat_centrees(self):
-        self.assertIn('table:style-name="centre" table:formula="of:=IF([.C4]&gt;=seuilDejeuner',
+        self.assertIn('table:style-name="centre" table:formula="of:=IF(OR(AND([.C4]&gt;0',
                       self.contenu)
         self.assertIn('<table:table-cell office:value-type="string"><text:p>Claude</text:p>',
                       self.contenu)
@@ -87,6 +89,7 @@ class TestClasseur(unittest.TestCase):
     def test_regles_rappelees(self):
         self.assertIn('déjeuner : ≥ 2 h entre 08:00 et 16:00', self.contenu)
         self.assertIn('Fenêtre du déjeuner (12:00–14:00) : désactivée.', self.contenu)
+        self.assertIn('dîner : présence entre 14:00 et 03:00', self.contenu)
 
     def test_noms_des_benevoles_dans_le_fichier_remis_a_l_equipe(self):
         for nom in ('Paula', 'Claude', 'Julie'):
@@ -110,8 +113,8 @@ class TestClasseur(unittest.TestCase):
         regles = replace(REGLES_BENEVOLES,
                          plages=(replace(dejeuner, presence_fenetre=0.5), diner))
         texte = self.ecrire('fenetre.ods', tableau(self.creneaux, regles), regles)
-        self.assertNotIn('seuilDejeuner;1;0)', texte)
-        self.assertIn('seuilDiner;1;0)', texte)
+        self.assertNotIn('seuilDejeuner)', texte)
+        self.assertIn('seuilDiner)', texte)
 
     def test_classeur_vide_refuse(self):
         with self.assertRaises(ValueError):

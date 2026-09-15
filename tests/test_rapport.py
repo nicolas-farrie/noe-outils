@@ -28,7 +28,7 @@ class TestResume(unittest.TestCase):
             self.assertNotIn(nom, rapport)
 
     def test_comptages_par_jour_et_par_lieu(self):
-        self.assertIn('26/09/2026 — 2 bénévole(s) présent(s), 2 déjeuner(s), 1 dîner(s)',
+        self.assertIn('26/09/2026 — 2 présent(s) dont 0 encadrant(s), 2 déjeuner(s), 1 dîner(s)',
                       self.rapport)
         # Paula : déjeuner à l'entrée (matin), dîner en cuisine (soir). Claude : déjeuner
         # à l'entrée, 14 h-16 h tombant dans la plage du matin.
